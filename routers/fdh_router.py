@@ -4,8 +4,6 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from db.database import get_db
-
-# Import schemas from your existing asset schema file
 from schemas.asset import FdhRead, SplitterRead
 from services import fdh as fdh_service
 

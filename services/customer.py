@@ -1,38 +1,3 @@
-# from sqlalchemy.orm import Session  # noqa: INP001
-
-# from db.models import Customer, CustomerStatus
-# from schemas import customer as customer_schema
-
-
-# def create_customer(
-#     db: Session,
-#     customer: customer_schema.CustomerCreate,
-# ) -> Customer:
-#     # Create the SQLAlchemy model instance from the Pydantic schema
-#     # We explicitly set the status to 'Pending' as per our business logic
-#     new_customer = Customer(
-#         name=customer.name,
-#         address=customer.address,
-#         pincode=customer.pincode,
-#         plan=customer.plan,
-#         status=CustomerStatus.Pending,  # Default status
-#     )
-
-#     db.add(new_customer)
-#     db.commit()
-#     db.refresh(new_customer)
-
-#     return new_customer
-
-
-# def get_customers_by_status(
-#     db: Session,
-#     status: customer_schema.CustomerStatus,
-# ) -> list[Customer]:
-#     # Query the Customer table, filter by the status enum, and return all results
-#     return db.query(Customer).filter(Customer.status == status).all()
-
-
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
@@ -45,6 +10,7 @@ from db.models import (
     AssetAssignment,
     AssetStatus,
     AssetType,
+    AuditLogActionType,
     BearingStatus,
     Customer,
     CustomerStatus,
@@ -52,11 +18,17 @@ from db.models import (
     Port,
     PortStatus,
     Splitter,
+    User,
 )
 from schemas import customer as customer_schema
+from services.audit import create_audit_log
 
 
-def create_customer(db: Session, customer: customer_schema.CustomerCreate) -> Customer:
+def create_customer(
+    db: Session,
+    customer: customer_schema.CustomerCreate,
+    current_user: User,
+) -> Customer:
     # We will manually control the transaction
     try:
         # ... (Steps 1-4: Find port, splitter, ONT, router - all stay the same) ...
@@ -171,6 +143,12 @@ def create_customer(db: Session, customer: customer_schema.CustomerCreate) -> Cu
         )
 
         # --- 9. Commit the Transaction ---
+        create_audit_log(
+            db=db,
+            user=current_user,
+            action_type=AuditLogActionType.CREATE,
+            description=f"User '{current_user.username}' created and provisioned customer '{new_customer.name}' (ID: {new_customer.customer_id}).",
+        )
         db.commit()
 
         # --- 10. Refresh and return the new customer ---
@@ -193,6 +171,7 @@ def create_customer(db: Session, customer: customer_schema.CustomerCreate) -> Cu
 def get_customers_by_status(
     db: Session,
     status: customer_schema.CustomerStatus,
+    current_user: User,
 ) -> list[Customer]:
     # Convert Pydantic enum to SQLAlchemy model enum
     model_status = CustomerStatus[status.value]
@@ -210,12 +189,21 @@ def get_customers_by_status(
     # Sort by creation date for consistency
     query = query.order_by(Customer.created_at.desc())
 
+    create_audit_log(
+        db=db,
+        user=current_user,
+        action_type=AuditLogActionType.READ,
+        description=f"User '{current_user.username}' fetched customers.",
+    )
+    db.commit()  # Commit the log
+
     return query.all()
 
 
 def get_customer_provisioning_details(
     db: Session,
     customer_id: int,
+    current_user: User,
 ) -> customer_schema.CustomerProvisioningDetailsRead:
     # 1. Define the complex query to get all data at once.
     # This query will join Customer -> Port -> Splitter -> FDH
@@ -224,7 +212,7 @@ def get_customer_provisioning_details(
         db.query(Customer)
         .options(
             joinedload(Customer.ports).options(
-                joinedload(Port.splitter).options(joinedload(Splitter.fdh))
+                joinedload(Port.splitter).options(joinedload(Splitter.fdh)),
             ),
             joinedload(Customer.assets),
         )
@@ -280,11 +268,22 @@ def get_customer_provisioning_details(
         ont_asset=ont_asset,
         router_asset=router_asset,
     )
+    create_audit_log(
+        db=db,
+        user=current_user,
+        action_type=AuditLogActionType.READ,
+        description=f"User '{current_user.username}' viewed provisioning details for customer ID {customer_id}.",
+    )
+    db.commit()
 
     return provisioning_details
 
 
-def deactivate_customer_and_provisioning(db: Session, customer_id: int) -> Customer:  # noqa: C901
+def deactivate_customer_and_provisioning(  # noqa: C901, PLR0915
+    db: Session,
+    customer_id: int,
+    current_user: User,
+) -> Customer:
     try:
         # --- 1. Get all related data in one efficient query ---
         customer = (
@@ -409,6 +408,12 @@ def deactivate_customer_and_provisioning(db: Session, customer_id: int) -> Custo
             db.add(router_assignment)
 
         # --- 4. Commit the Transaction ---
+        create_audit_log(
+            db=db,
+            user=current_user,
+            action_type=AuditLogActionType.UPDATE,  # Or DELETE, your choice
+            description=f"User '{current_user.username}' deactivated customer '{customer.name}' (ID: {customer.customer_id}).",
+        )
         db.commit()
 
         # --- 5. Refresh and return the updated customer ---
@@ -431,6 +436,7 @@ def deactivate_customer_and_provisioning(db: Session, customer_id: int) -> Custo
 def get_customer_deactivation_details(
     db: Session,
     customer_id: int,
+    current_user: User,
 ) -> customer_schema.CustomerDeactivationDetailsRead:
     # 1. Get the customer object
     customer = db.get(Customer, customer_id)
@@ -448,6 +454,7 @@ def get_customer_deactivation_details(
         provisioning_details = get_customer_provisioning_details(
             db=db,
             customer_id=customer_id,
+            current_user=current_user,
         )
     except Exception as e:  # noqa: BLE001
         # If this fails, we can decide to fail the whole request
@@ -464,5 +471,12 @@ def get_customer_deactivation_details(
         customer=customer,
         provisioning=provisioning_details,
     )
+    create_audit_log(
+        db=db,
+        user=current_user,
+        action_type=AuditLogActionType.READ,
+        description=f"User '{current_user.username}' viewed deactivation details for customer ID {customer_id}.",
+    )
+    db.commit()
 
     return deactivation_details

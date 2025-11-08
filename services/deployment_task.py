@@ -2,6 +2,7 @@ from fastapi import HTTPException, status  # noqa: INP001
 from sqlalchemy.orm import Session, joinedload
 
 from db.models import (  # We need this to check if the user exists
+    AuditLogActionType,
     Customer,
     CustomerStatus,
     DeploymentTask,
@@ -10,6 +11,7 @@ from db.models import (  # We need this to check if the user exists
     UserRole,
 )
 from schemas import deployment_task as deployment_task_schema
+from services.audit import create_audit_log
 
 
 # Custom exceptions are a good practice for cleaner router handling
@@ -24,6 +26,7 @@ class UserNotFoundError(Exception):
 def create_deployment_task(
     db: Session,
     task: deployment_task_schema.DeploymentTaskCreate,
+    current_user: User,
 ) -> DeploymentTask:
     # 1. Get the customer
     db_customer = (
@@ -66,22 +69,48 @@ def create_deployment_task(
     )
 
     try:
+        # 5. Add the new task to the session
         db.add(new_task)
+
+        # 6. Flush (but don't commit) to get the new_task.task_id
+        db.flush()
+
+        # 7. Create the audit log *before* committing
+        create_audit_log(
+            db=db,
+            user=current_user,  # This is the Planner/Admin who clicked "Assign"
+            action_type=AuditLogActionType.CREATE,
+            description=f"User '{current_user.username}' created Task (ID: {new_task.task_id}) for Customer '{db_customer.name}', assigned to Technician '{current_user.username}'.",
+        )
+
+        # 8. Commit the transaction (saves both the task and the log)
         db.commit()
-        db.refresh(new_task)
 
-        # Eagerly load the relationships for the response model
-        db.query(DeploymentTask).filter(
-            DeploymentTask.task_id == new_task.task_id,
-        ).options(
-            joinedload(DeploymentTask.customer),
-            joinedload(DeploymentTask.user),
-        ).first()
+        # 9. Now, query for the full object to return
+        # This is the correct way to load relationships for the response
+        complete_task = (
+            db.query(DeploymentTask)
+            .options(
+                joinedload(DeploymentTask.customer),
+                joinedload(DeploymentTask.user),
+            )
+            .filter(DeploymentTask.task_id == new_task.task_id)
+            .first()
+        )
 
-        return new_task  # noqa: TRY300
+        if not complete_task:
+            # This should never happen, but it's good practice
+            raise HTTPException(  # noqa: TRY301
+                status_code=404,
+                detail="Task created but could not be retrieved.",
+            )
+
     except Exception as e:
         db.rollback()
+        # Re-raise the exception to be caught by the router
         raise e  # noqa: TRY201
+    else:
+        return complete_task
 
 
 def get_tasks_by_status(
@@ -106,6 +135,14 @@ def get_tasks_by_status(
     # If the user is a technician, add a filter for their user_id
     if user.role == UserRole.Technician:
         query = query.filter(DeploymentTask.user_id == user.user_id)
+
+    create_audit_log(
+        db=db,
+        user=user,
+        action_type=AuditLogActionType.READ,
+        description=f"User '{user.username}' viewed task list for status '{status.value}'.",
+    )
+    db.commit()
 
     return query.all()
 
@@ -155,6 +192,14 @@ def update_task_checklist(
 
     # 5. Commit, refresh, and return
     db.add(task)
+    create_audit_log(
+        db=db,
+        user=current_user,
+        action_type=AuditLogActionType.UPDATE,
+        description=f"User {current_user.username} changed task status of task_id: {task_id}",
+    )
+
+    # ... (your db.add(task), db.add(customer), etc.) ...
     db.commit()
     db.refresh(task)
 
