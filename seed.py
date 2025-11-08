@@ -1,15 +1,14 @@
-# seed.py
-import random
+import logging
+from datetime import datetime, timezone
+from decimal import Decimal
 
-from faker import Faker
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
-from db.base import Base
-
-# --- IMPORT YOUR DB SETUP AND MODELS ---
-# (Adjust these imports based on your file structure)
-from db.database import SessionLocal, engine
+# passlib removed
+# --- Project Imports ---
+# Import the session and all models from your project files
+from db.database import SessionLocal
 from db.models import (
     FDH,
     Asset,
@@ -22,190 +21,348 @@ from db.models import (
     Port,
     PortStatus,
     Splitter,
-    SplitterStatus,
-    Warehouse,
+    # User, UserRole, and AuditLog removed
 )
 
-# Initialize Faker
-fake = Faker()
+# --- Setup Logging ---
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+# --- Password Hashing Setup Removed ---
 
 
-def clear_data(db: Session):
+def truncate_and_fix_tables(session):
     """
-    Deletes all data from the tables in the correct order
-    to avoid foreign key constraint errors.
+    Truncates all data tables and fixes the splitters.status column schema
+    to match the AssetStatus enum.
     """
-    print("Clearing all existing data...")
+    log.info("--- Preparing Database: Disabling Foreign Keys ---")
+    try:
+        # Use 'inventorymanager' schema as seen in your logs
+        schema_name = "inventorymanager"
 
-    # Delete in reverse order of creation/dependency
-    db.query(AssetAssignment).delete()
-    db.query(Asset).delete()
-    db.query(Port).delete()
-    db.query(Customer).delete()
-    db.query(Splitter).delete()
-    db.query(FDH).delete()
-    db.query(Warehouse).delete()
+        session.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
 
-    db.commit()
-    print("Data cleared.")
+        # --- FIX SCHEMA MISMATCH ---
+        log.info("Fixing splitters.status column schema...")
+        alter_stmt = text(
+            f"ALTER TABLE {schema_name}.splitters MODIFY status VARCHAR(10) NOT NULL"
+        )
+        session.execute(alter_stmt)
+        log.info("Column 'splitters.status' fixed.")
+
+        # --- TRUNCATE TABLES ---
+        tables = [
+            "asset_assignments",
+            "assets",
+            "ports",
+            "splitters",
+            "customers",
+            "fdhs",
+            # "audit_logs" and "users" removed
+        ]
+        for table in tables:
+            log.info(f"Truncating {schema_name}.{table}...")
+            session.execute(text(f"TRUNCATE TABLE {schema_name}.{table};"))
+
+        log.info("All tables truncated.")
+
+        # --- RE-ENABLE KEYS ---
+        session.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+        log.info("--- Database Prep Finished: Foreign Keys Re-enabled ---")
+
+        session.commit()
+    except SQLAlchemyError as e:
+        log.error(f"Error during table preparation: {e}")
+        session.rollback()
+        raise
 
 
-def seed_data(db: Session):
-    """
-    Populates the database with fake data.
-    """
-    print("Seeding new data...")
+def seed_data(session):
+    """Inserts new, interconnected seed data."""
+    log.info("--- Seeding New Data ---")
+
+    # --- Pincodes (5 Chennai Pincodes) ---
+    pincodes = ["600001", "600017", "600041", "600028", "600086"]
 
     try:
-        # --- 1. Create items with no dependencies ---
+        # --- 1. Users block removed ---
 
-        warehouses = [
-            Warehouse(address=fake.street_address(), pincode=fake.zipcode()[:6])
-            for _ in range(5)
-        ]
-        db.add_all(warehouses)
-
-        fdhs = [
-            FDH(
-                model=random.choice(["FDH-100", "FDH-200", "FDH-300"]),
-                pincode=fake.zipcode()[:6],
-                latitude=fake.latitude(),
-                longitude=fake.longitude(),
-            )
-            for _ in range(10)
-        ]
-        db.add_all(fdhs)
-
-        customers = [
-            Customer(
-                name=fake.name(),
-                address=fake.address(),
-                pincode=fake.zipcode()[:6],
-                plan=random.choice(["Basic-100", "Premium-500", "Pro-1000"]),
-                status=fake.enum(CustomerStatus),
-            )
-            for _ in range(50)
-        ]
-        db.add_all(customers)
-
-        # Commit to get IDs for the next batch
-        db.commit()
-        print("Created Warehouses, FDHs, and Customers.")
-
-        # --- 2. Create items that depend on Step 1 ---
-
-        splitters = [
-            Splitter(
-                model=random.choice(["SPL-1x8", "SPL-1x16", "SPL-1x32"]),
-                status=fake.enum(SplitterStatus),
-                max_ports=16,
-                used_ports=0,  # We'll update this later
-                fdh_id=random.choice(fdhs).fdh_id,
-            )
-            for _ in range(30)
-        ]
-        db.add_all(splitters)
-        db.commit()
-        print("Created Splitters.")
-
-        # --- 3. Create items that depend on Step 1 & 2 ---
-
-        ports = []
-        for splitter in splitters:
-            # Create a few ports for each splitter
-            num_ports_to_create = random.randint(4, splitter.max_ports)
-            splitter.used_ports = num_ports_to_create  # Update used_ports
-
-            for _ in range(num_ports_to_create):
-                # 80% chance port is occupied, 20% free
-                is_occupied = random.random() < 0.8
-                port_status = PortStatus.occupied if is_occupied else PortStatus.free
-
-                ports.append(
-                    Port(
-                        port_status=port_status,
-                        # If occupied, assign a customer. If free, leave as None.
-                        customer_id=random.choice(customers).customer_id
-                        if is_occupied
-                        else None,
-                        splitter_id=splitter.splitter_id,
-                    )
-                )
-        db.add_all(ports)
-        db.commit()
-        print("Created Ports.")
-
-        # --- 4. Create Assets ---
-
-        assets = []
-        for _ in range(100):
-            # 50% assigned to customer, 50% in warehouse
-            is_assigned = random.random() < 0.5
-
-            assets.append(
-                Asset(
-                    type=fake.enum(AssetType),
-                    model=random.choice(["Model-X", "Model-Y", "Model-Z"]),
-                    serial_number=fake.unique.ssn(),  # Using ssn for a unique string
-                    status=AssetStatus.assigned
-                    if is_assigned
-                    else AssetStatus.available,
-                    pincode=fake.zipcode()[:6],
-                    assigned_to_customer_id=random.choice(customers).customer_id
-                    if is_assigned
-                    else None,
-                    stored_at_warehouse_id=None
-                    if is_assigned
-                    else random.choice(warehouses).warehouse_id,
-                    port_id=None,  # We can assign this later or leave as null
-                )
-            )
-        db.add_all(assets)
-        db.commit()
-        print("Created Assets.")
-
-        # --- 5. Create Asset Assignments (History) ---
-
-        # Find just the assigned assets
-        assigned_assets = [a for a in assets if a.status == AssetStatus.assigned]
-
-        assignments = [
-            AssetAssignment(
-                asset_id=asset.asset_id,
-                bearing_status=BearingStatus.bearing,
-                date_of_issue=fake.date_time_this_year(),
-                customer_id=asset.assigned_to_customer_id,
-            )
-            for asset in assigned_assets
-        ]
-        db.add_all(assignments)
-        db.commit()
-        print("Created Asset Assignments.")
-
-        print("\n--- Seeding complete! ---")
-
-    except IntegrityError as e:
-        print(
-            f"Error: An integrity constraint failed (e.g., duplicate key). Rolling back. {e}"
+        # --- 2. FDHs (Fiber Distribution Hubs) ---
+        fdh1_p1 = FDH(
+            model="Nokia FX-8",
+            pincode=pincodes[0],
+            latitude=Decimal("13.0880"),
+            longitude=Decimal("80.2821"),
         )
-        db.rollback()
+        fdh2_p1 = FDH(
+            model="Huawei MA5600T",
+            pincode=pincodes[0],
+            latitude=Decimal("13.0885"),
+            longitude=Decimal("80.2825"),
+        )
+        fdh1_p2 = FDH(
+            model="Nokia FX-8",
+            pincode=pincodes[1],
+            latitude=Decimal("13.0400"),
+            longitude=Decimal("80.2300"),
+        )
+        fdh1_p3 = FDH(
+            model="ZTE C300",
+            pincode=pincodes[2],
+            latitude=Decimal("13.0010"),
+            longitude=Decimal("80.2550"),
+        )
+        session.add_all([fdh1_p1, fdh2_p1, fdh1_p2, fdh1_p3])
+        session.flush()
+        log.info("FDHs created.")
+
+        # --- 3. Splitters ---
+        sp1_f1 = Splitter(
+            model="1:8 Passive", status=AssetStatus.available, max_ports=8, fdh=fdh1_p1
+        )
+        sp2_f1 = Splitter(
+            model="1:16 Passive",
+            status=AssetStatus.available,
+            max_ports=16,
+            fdh=fdh1_p1,
+        )
+        sp1_f2 = Splitter(
+            model="1:8 Passive", status=AssetStatus.available, max_ports=8, fdh=fdh2_p1
+        )
+        sp1_f3 = Splitter(
+            model="1:32 Passive",
+            status=AssetStatus.available,
+            max_ports=32,
+            fdh=fdh1_p2,
+        )
+        session.add_all([sp1_f1, sp2_f1, sp1_f2, sp1_f3])
+        session.flush()
+        log.info("Splitters created.")
+
+        # --- 4. Ports ---
+        ports_sp1 = [
+            Port(port_status=PortStatus.free, splitter=sp1_f1)
+            for _ in range(sp1_f1.max_ports)
+        ]
+        ports_sp2 = [
+            Port(port_status=PortStatus.free, splitter=sp2_f1)
+            for _ in range(sp2_f1.max_ports)
+        ]
+        ports_sp3 = [
+            Port(port_status=PortStatus.free, splitter=sp1_f3)
+            for _ in range(sp1_f3.max_ports)
+        ]
+        session.add_all(ports_sp1 + ports_sp2 + ports_sp3)
+        session.flush()
+        log.info("Ports created.")
+
+        # --- 5. Customers ---
+        cust1 = Customer(
+            name="Arun Kumar",
+            address="12, NSC Bose Road, Parrys",
+            pincode=pincodes[0],
+            plan="Fiber Gold 100Mbps",
+            status=CustomerStatus.Active,
+        )
+        cust2 = Customer(
+            name="Priya Selvam",
+            address="45, Usman Road, T. Nagar",
+            pincode=pincodes[1],
+            plan="Fiber Platinum 300Mbps",
+            status=CustomerStatus.Active,
+        )
+        cust3 = Customer(
+            name="Suresh Gupta",
+            address="8, Mint Street, Sowcarpet",
+            pincode=pincodes[0],
+            plan="Fiber Silver 50Mbps",
+            status=CustomerStatus.Active,
+        )
+        cust4 = Customer(
+            name="Anita Desai",
+            address="22, Thyagaraya Road, T. Nagar",
+            pincode=pincodes[1],
+            plan="Fiber Gold 100Mbps",
+            status=CustomerStatus.Pending,
+        )
+        cust5 = Customer(
+            name="Rajesh Kannan",
+            address="10, St Marys Road, Alwarpet",
+            pincode=pincodes[2],
+            plan="Fiber Gold 100Mbps",
+            status=CustomerStatus.Inactive,
+        )
+        session.add_all([cust1, cust2, cust3, cust4, cust5])
+        session.flush()
+        log.info("Customers created.")
+
+        # --- 6. Assets (ONTs and Routers) ---
+        ont1_w1 = Asset(
+            type=AssetType.ONT,
+            model="Nokia G-140W-C",
+            serial_number="NK12345678",
+            status=AssetStatus.available,
+            pincode=pincodes[0],
+        )
+        rtr1_w1 = Asset(
+            type=AssetType.Router,
+            model="TP-Link Archer C6",
+            serial_number="TP12345678",
+            status=AssetStatus.available,
+            pincode=pincodes[0],
+        )
+        ont2_w1 = Asset(
+            type=AssetType.ONT,
+            model="Huawei HG8245H",
+            serial_number="HW12345678",
+            status=AssetStatus.available,
+            pincode=pincodes[0],
+        )
+        ont3_w2 = Asset(
+            type=AssetType.ONT,
+            model="Nokia G-140W-C",
+            serial_number="NK98765432",
+            status=AssetStatus.available,
+            pincode=pincodes[1],
+        )
+        rtr2_w2 = Asset(
+            type=AssetType.Router,
+            model="D-Link DIR-825",
+            serial_number="DL98765432",
+            status=AssetStatus.available,
+            pincode=pincodes[1],
+        )
+        rtr3_w2 = Asset(
+            type=AssetType.Router,
+            model="TP-Link Archer C6",
+            serial_number="TP98765432",
+            status=AssetStatus.available,
+            pincode=pincodes[1],
+        )
+        ont4_p3 = Asset(
+            type=AssetType.ONT,
+            model="ZTE F609",
+            serial_number="ZT55555555",
+            status=AssetStatus.available,
+            pincode=pincodes[2],
+        )
+        rtr4_p4 = Asset(
+            type=AssetType.Router,
+            model="Netgear R6120",
+            serial_number="NG44444444",
+            status=AssetStatus.faulty,
+            pincode=pincodes[3],
+        )
+        session.add_all(
+            [ont1_w1, rtr1_w1, ont2_w1, ont3_w2, rtr2_w2, rtr3_w2, ont4_p3, rtr4_p4]
+        )
+        session.flush()
+        log.info("Assets created.")
+
+        # --- 7. Chain Customer 1 (Arun Kumar @ 600001) ---
+        log.info("Chaining Customer 1 (Arun Kumar)...")
+        port_for_cust1 = ports_sp1[0]
+        port_for_cust1.port_status = PortStatus.occupied
+        port_for_cust1.customer = cust1
+
+        ont_for_cust1 = ont1_w1
+        ont_for_cust1.status = AssetStatus.assigned
+        ont_for_cust1.pincode = cust1.pincode
+        ont_for_cust1.customer = cust1
+        ont_for_cust1.port = port_for_cust1
+
+        rtr_for_cust1 = rtr1_w1
+        rtr_for_cust1.status = AssetStatus.assigned
+        rtr_for_cust1.pincode = cust1.pincode
+        rtr_for_cust1.customer = cust1
+
+        assign1_ont = AssetAssignment(
+            asset=ont_for_cust1,
+            bearing_status=BearingStatus.bearing,
+            date_of_issue=datetime.now(timezone.utc),
+            customer=cust1,
+        )
+        assign1_rtr = AssetAssignment(
+            asset=rtr_for_cust1,
+            bearing_status=BearingStatus.bearing,
+            date_of_issue=datetime.now(timezone.utc),
+            customer=cust1,
+        )
+        session.add_all(
+            [port_for_cust1, ont_for_cust1, rtr_for_cust1, assign1_ont, assign1_rtr]
+        )
+
+        # --- 8. Chain Customer 2 (Priya Selvam @ 600017) ---
+        log.info("Chaining Customer 2 (Priya Selvam)...")
+        port_for_cust2 = ports_sp3[0]
+        port_for_cust2.port_status = PortStatus.occupied
+        port_for_cust2.customer = cust2
+
+        ont_for_cust2 = ont3_w2
+        ont_for_cust2.status = AssetStatus.assigned
+        ont_for_cust2.pincode = cust2.pincode
+        ont_for_cust2.customer = cust2
+        ont_for_cust2.port = port_for_cust2
+
+        rtr_for_cust2 = rtr2_w2
+        rtr_for_cust2.status = AssetStatus.assigned
+        rtr_for_cust2.pincode = cust2.pincode
+        rtr_for_cust2.customer = cust2
+
+        assign2_ont = AssetAssignment(
+            asset=ont_for_cust2,
+            bearing_status=BearingStatus.bearing,
+            date_of_issue=datetime.now(timezone.utc),
+            customer=cust2,
+        )
+        assign2_rtr = AssetAssignment(
+            asset=rtr_for_cust2,
+            bearing_status=BearingStatus.bearing,
+            date_of_issue=datetime.now(timezone.utc),
+            customer=cust2,
+        )
+        session.add_all(
+            [port_for_cust2, ont_for_cust2, rtr_for_cust2, assign2_ont, assign2_rtr]
+        )
+
+        # --- 9. Update Splitter Port Counts ---
+        sp1_f1.used_ports = 1
+        sp1_f3.used_ports = 1
+        log.info("Customer chains created and ports updated.")
+
+        # --- 10. Audit Log Entry Removed ---
+
+        # --- Commit ---
+        session.commit()
+        log.info("--- Seed Data Committed Successfully! ---")
+
+    except SQLAlchemyError as e:
+        log.error(f"Error seeding data: {e}")
+        session.rollback()
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        db.rollback()
+        log.error(f"An unexpected error occurred: {e}")
+        session.rollback()
 
 
-if __name__ == "__main__":
-    # This block runs when you execute the script directly
-
-    # Optional: You can create a fresh, empty DB every time
-    # Base.metadata.drop_all(bind=engine)
-    # Base.metadata.create_all(bind=engine)
-    # print("Tables dropped and recreated.")
+def main():
+    log.info("--- Starting Seed Script ---")
 
     db = SessionLocal()
     try:
-        clear_data(db)  # Start from a clean slate
-        seed_data(db)  # Populate with new data
+        # Step 1: Fix schema and truncate all tables
+        truncate_and_fix_tables(db)
+
+        # Step 2: Seed fresh data
+        seed_data(db)
+
+    except Exception as e:
+        log.error(f"Seeding script failed: {e}")
     finally:
         db.close()
-        print("Database session closed.")
+
+    log.info("--- Seed Script Finished ---")
+
+
+if __name__ == "__main__":
+    main()

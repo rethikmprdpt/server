@@ -29,19 +29,6 @@ asset_router = APIRouter(prefix="/assets")
 
 
 @asset_router.get(
-    "/",
-    response_model=list[asset_schema.AssetRead],
-)
-async def get_assets_by_location(
-    pincode: str,
-    db: Annotated[Session, Depends(get_db)],
-):
-    assets = asset_service.get_assets_by_pincode(db=db, pincode=pincode)
-    # An empty list is a valid response, no 404 needed.
-    return assets
-
-
-@asset_router.get(
     "/{asset_id}",
     response_model=asset_schema.AssetRead,
 )
@@ -68,6 +55,24 @@ async def get_asset_assignment_history(
         # Return an empty list instead of 404
         return []
     return history
+
+
+@asset_router.get(
+    "/",
+    response_model=list[asset_schema.AssetRead],
+    summary="Get assets by type and status",
+)
+async def get_assets_by_type_and_status(
+    db: Annotated[Session, Depends(get_db)],
+    asset_type: asset_schema.AssetType,  # Required query param (e.g., "ONT")
+    asset_status: asset_schema.AssetStatus = asset_schema.AssetStatus.available,  # Optional
+):
+    assets = asset_service.get_assets(
+        db=db,
+        asset_type=asset_type,
+        asset_status=asset_status,
+    )
+    return assets
 
 
 # @asset_router.put(

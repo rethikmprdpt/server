@@ -1,3 +1,4 @@
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -15,6 +16,8 @@ engine = create_engine(
     url=DATABASE_URL,
     echo=True,
 )
+
+log = logging.getLogger(__name__)
 
 SessionLocal = sessionmaker(
     bind=engine,
