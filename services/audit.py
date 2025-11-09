@@ -2,10 +2,15 @@ from datetime import datetime, timedelta, timezone  # noqa: INP001
 
 from sqlalchemy.orm import Session, joinedload
 
-from db.models import AuditLog, User
+from db.models import AuditLog, AuditLogActionType, User
 
 
-def create_audit_log(db: Session, user: User, action_type: str, description: str):
+def create_audit_log(
+    db: Session,
+    user: User,
+    action_type: AuditLogActionType,
+    description: str,
+):
     new_log = AuditLog(
         user_id=user.user_id,
         action_type=action_type,

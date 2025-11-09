@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
@@ -99,6 +99,18 @@ async def login_for_access_token(
     # Refresh token only needs the subject (username)
     refresh_token_data = {"sub": user.username}
     refresh_token = auth_utils.create_refresh_token(data=refresh_token_data)
+
+    try:
+        # Get the current time in UTC
+        user.last_login = datetime.now(timezone.utc)
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        # Log this error, but don't fail the login
+        print(f"Error updating last_login for {user.username}: {e}")
 
     # 4. Set the refresh token in an HttpOnly cookie
     response.set_cookie(

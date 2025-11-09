@@ -127,6 +127,11 @@ class AssetStatus(str, enum.Enum):
     retired = "retired"
 
 
+class PortStatus(str, enum.Enum):
+    free = "free"
+    occupied = "occupied"
+
+
 # --- YOUR EXISTING SCHEMAS (Unchanged, just using Model enums) ---
 
 
@@ -139,7 +144,16 @@ class CustomerLite(BaseModel):
 class PortLite(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     port_id: int
-    port_status: str  # You might want to use PortStatus enum here
+    port_status: PortStatus  # You might want to use PortStatus enum here
+
+
+class PortRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    port_id: int
+    port_status: PortStatus
+    splitter_id: int
+    customer_id: int | None = None
 
 
 class AssetAssignmentLite(BaseModel):

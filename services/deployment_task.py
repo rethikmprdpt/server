@@ -147,14 +147,78 @@ def get_tasks_by_status(
     return query.all()
 
 
+# def update_task_checklist(
+#     db: Session,
+#     task_id: int,
+#     checklist: deployment_task_schema.DeploymentTaskChecklistUpdate,
+#     current_user: User,
+# ) -> DeploymentTask:
+#     # 1. Find the task
+#     task = db.get(DeploymentTask, task_id)
+
+#     if not task:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND,
+#             detail="Task not found",
+#         )
+
+#     # 2. Check permissions
+#     if (
+#         current_user.role == UserRole.Technician
+#         and task.user_id != current_user.user_id
+#     ):
+#         raise HTTPException(
+#             status_code=status.HTTP_403_FORBIDDEN,
+#             detail="You are not authorized to update this task.",
+#         )
+#     # Planners and Admins can update any task
+
+#     # 3. Apply the updates
+#     task.step_1 = checklist.step_1
+#     task.step_2 = checklist.step_2
+#     task.step_3 = checklist.step_3
+
+#     # 4. Check if the task is now completed
+#     # 4. Check if the task is now completed
+#     if task.step_1 and task.step_2 and task.step_3:  # noqa: SIM102
+#         # This code ONLY runs if all 3 steps are True
+#         if task.status != DeploymentTaskStatus.Completed:
+#             task.status = DeploymentTaskStatus.Completed
+
+#             # This is the logic you want:
+#             if task.customer:
+#                 task.customer.status = CustomerStatus.Active
+#                 db.add(task.customer)
+
+#     # 5. Commit, refresh, and return
+#     db.add(task)
+#     create_audit_log(
+#         db=db,
+#         user=current_user,
+#         action_type=AuditLogActionType.UPDATE,
+#         description=f"User {current_user.username} changed task status of task_id: {task_id}",
+#     )
+
+#     # ... (your db.add(task), db.add(customer), etc.) ...
+#     db.commit()
+#     db.refresh(task)
+
+#     return task
+
+
 def update_task_checklist(
     db: Session,
     task_id: int,
     checklist: deployment_task_schema.DeploymentTaskChecklistUpdate,
     current_user: User,
 ) -> DeploymentTask:
-    # 1. Find the task
-    task = db.get(DeploymentTask, task_id)
+    # 1. Find the task AND its related customer in one query
+    task = (
+        db.query(DeploymentTask)
+        .options(joinedload(DeploymentTask.customer))
+        .filter(DeploymentTask.task_id == task_id)
+        .first()
+    )
 
     if not task:
         raise HTTPException(
@@ -173,34 +237,67 @@ def update_task_checklist(
         )
     # Planners and Admins can update any task
 
-    # 3. Apply the updates
+    # --- 3. (NEW) Prevent updates on finalized tasks ---
+    if task.status in [DeploymentTaskStatus.Completed, DeploymentTaskStatus.Failed]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Task is already {task.status.value} and cannot be modified.",
+        )
+
+    # 4. Apply the updates
     task.step_1 = checklist.step_1
     task.step_2 = checklist.step_2
     task.step_3 = checklist.step_3
 
-    # 4. Check if the task is now completed
-    # 4. Check if the task is now completed
-    if task.step_1 and task.step_2 and task.step_3:  # noqa: SIM102
-        # This code ONLY runs if all 3 steps are True
-        if task.status != DeploymentTaskStatus.Completed:
-            task.status = DeploymentTaskStatus.Completed
+    # --- 5. (NEW) Automatically update status based on checklist ---
 
-            # This is the logic you want:
-            if task.customer:
-                task.customer.status = CustomerStatus.Active
-                db.add(task.customer)
+    # Store old status for logging
+    old_status = task.status
 
-    # 5. Commit, refresh, and return
-    db.add(task)
+    if task.step_1 and task.step_2 and task.step_3:
+        # All 3 are checked: Mark as Completed
+        task.status = DeploymentTaskStatus.Completed
+        if task.customer:
+            task.customer.status = CustomerStatus.Active
+            db.add(task.customer)  # Add the customer to the session for update
+
+    elif task.step_1 or task.step_2 or task.step_3:
+        # At least 1 (but not all 3) is checked: Mark as InProgress
+        task.status = DeploymentTaskStatus.InProgress
+
+    else:
+        # All 0 are checked: Revert to Scheduled
+        task.status = DeploymentTaskStatus.Scheduled
+
+    # --- 6. Create Audit Log ---
+    log_desc = f"User '{current_user.username}' updated checklist for Task (ID: {task.task_id}). Steps: [1: {task.step_1}, 2: {task.step_2}, 3: {task.step_3}]."
+
+    # Add more detail if the status changed
+    if old_status != task.status:
+        log_desc += (
+            f" Task status changed from '{old_status.value}' to '{task.status.value}'."
+        )
+        if task.status == DeploymentTaskStatus.Completed:
+            log_desc += " Customer status set to 'Active'."
+
     create_audit_log(
         db=db,
         user=current_user,
         action_type=AuditLogActionType.UPDATE,
-        description=f"User {current_user.username} changed task status of task_id: {task_id}",
+        description=log_desc,
     )
 
-    # ... (your db.add(task), db.add(customer), etc.) ...
+    # 7. Commit, refresh, and return
+    db.add(task)
     db.commit()
+
+    # We need to refresh the relationships as well
     db.refresh(task)
+    if task.customer:
+        db.refresh(task.customer)
+
+    # Re-load the 'user' relationship which wasn't part of this query
+    task_user = db.get(User, task.user_id)
+    task.user = task_user
 
     return task

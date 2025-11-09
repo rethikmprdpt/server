@@ -63,6 +63,7 @@ from routers.customer_router import customer_router
 from routers.deployment_router import deployment_router
 from routers.fdh_router import fdh_router
 from routers.inventory_router import inventory_router
+from routers.splitter_router import splitter_router
 from routers.user_router import user_router
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ app.include_router(deployment_router)
 app.include_router(user_router)
 app.include_router(fdh_router)
 app.include_router(audit_router)
+app.include_router(splitter_router)
 
 
 @app.get("/", tags=["Root"])
