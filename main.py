@@ -56,6 +56,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import db.models  # noqa: F401
 from db.base import Base
 from db.database import engine
+from routers.ai_router import ai_router
 from routers.asset_router import asset_router
 from routers.audit_router import audit_router
 from routers.auth_router import auth_router
@@ -129,6 +130,7 @@ app.include_router(user_router)
 app.include_router(fdh_router)
 app.include_router(audit_router)
 app.include_router(splitter_router)
+app.include_router(ai_router)
 
 
 @app.get("/", tags=["Root"])
