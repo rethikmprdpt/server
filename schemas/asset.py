@@ -192,6 +192,12 @@ class AssetAssignmentRead(BaseModel):
     customer: CustomerLite
 
 
+class AssetSwap(BaseModel):
+    old_asset_id: int
+    new_asset_id: int
+    reason: str | None = None  # Optional reason for audit logs
+
+
 class SplitterLite(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -227,3 +233,15 @@ class SplitterRead(SplitterLite):
     max_ports: int
     used_ports: int
     fdh: FdhRead | None
+
+
+class AssetCreate(AssetBase):
+    pass
+
+
+class AssetUpdate(BaseModel):
+    model: str | None = None
+    pincode: str | None = None
+    status: ModelAssetStatus
+    # We explicitly DO NOT allow changing serial_number or type.
+    # Those changes should require deleting and creating a new asset.
